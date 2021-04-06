@@ -1,5 +1,6 @@
 [![Build Status](https://travis-ci.org/Malinskiy/marathon.svg?branch=develop)](https://travis-ci.org/Malinskiy/marathon)
-[![Slack](https://img.shields.io/badge/slack-chat-green.svg?logo=slack&longCache=true&style=flat)](https://join.slack.com/t/marathon-test-runner/shared_invite/enQtNDczODU5MDUzOTg0LTNhYjRhOGRhMjMwMGZjMjY5MTY3MDI3ZmMzNTRjYzhmOGRkNDQ5OTIzMzA4ODQ5YjZmMWNiZjljMzcyY2VhMzE)
+[![codecov](https://codecov.io/gh/malinskiy/marathon/branch/develop/graph/badge.svg)](https://codecov.io/gh/malinskiy/marathon)
+[![Slack](https://img.shields.io/badge/slack-chat-green.svg?logo=slack&longCache=true&style=flat)](https://bit.ly/2LLghaW)
 
 # Marathon
 Cross-platform test runner written for Android and iOS projects
@@ -7,6 +8,9 @@ Cross-platform test runner written for Android and iOS projects
 ## Main focus
 - **stability** of test execution adjusting for flakiness in the environment and in the tests. 
 - **performance** using high parallelization (handling dozens of devices)
+
+## Documentation
+Please check the official [documentation](https://malinskiy.github.io/marathon/) for installation, configuration and more
 
 License
 -------

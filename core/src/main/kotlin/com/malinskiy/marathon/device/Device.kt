@@ -4,7 +4,7 @@ import com.malinskiy.marathon.execution.Configuration
 import com.malinskiy.marathon.execution.TestBatchResults
 import com.malinskiy.marathon.execution.progress.ProgressReporter
 import com.malinskiy.marathon.test.TestBatch
-import kotlinx.coroutines.experimental.CompletableDeferred
+import kotlinx.coroutines.CompletableDeferred
 
 interface Device {
     val operatingSystem: OperatingSystem
@@ -16,13 +16,39 @@ interface Device {
     val healthy: Boolean
     val abi: String
 
-    fun execute(configuration: Configuration,
-                devicePoolId: DevicePoolId,
-                testBatch: TestBatch,
-                deferred: CompletableDeferred<TestBatchResults>,
-                progressReporter: ProgressReporter)
+    /**
+     * Called before each batch execution
+     *
+     * Should throw an instance of DeviceSetupException
+     *
+     * @see com.malinskiy.marathon.exceptions.DeviceSetupException
+     *
+     */
+    suspend fun prepare(configuration: Configuration)
 
-    fun prepare(configuration: Configuration)
+    /**
+     * Test batch execution
+     *
+     * This can and should throw an instance of
+     * - DeviceLostException in case of unrecoverable errors that will never allow the device to execute tests
+     * - TestBatchExecutionException in case the device might still be able to execute tests later
+     *
+     * If any other exception is thrown - it is assumed to be recoverable and will retry using this device again
+     *
+     * @see com.malinskiy.marathon.exceptions.DeviceLostException
+     * @see com.malinskiy.marathon.exceptions.TestBatchExecutionException
+     */
+    suspend fun execute(
+        configuration: Configuration,
+        devicePoolId: DevicePoolId,
+        testBatch: TestBatch,
+        deferred: CompletableDeferred<TestBatchResults>,
+        progressReporter: ProgressReporter
+    )
+
+    /**
+     * Called after the device has been disconnected
+     */
     fun dispose()
 }
 

@@ -1,6 +1,7 @@
 plugins {
     `java-gradle-plugin`
     `kotlin-dsl`
+    id("org.jetbrains.dokka")
 }
 
 
@@ -19,6 +20,9 @@ dependencies {
     implementation(gradleApi())
     implementation(Libraries.kotlinLogging)
     implementation(project(":core"))
-    implementation(project(":vendor-android"))
+    implementation(project(":vendor:vendor-android:base"))
+    implementation(project(":vendor:vendor-android:adam"))
+    implementation(project(":vendor:vendor-android:ddmlib"))
     implementation(BuildPlugins.androidGradle)
+    implementation(project(":analytics:usage"))
 }

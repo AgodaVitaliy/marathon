@@ -7,11 +7,11 @@ analyticsConfiguration:
     password: "root"
     dbName: "marathon"
 poolingStrategy:
-- type: "omni"
-- type: "device-model"
-- type: "os-version"
-- type: "manufacturer"
-- type: "abi"
+  - type: "omni"
+  - type: "device-model"
+  - type: "os-version"
+  - type: "manufacturer"
+  - type: "abi"
 shardingStrategy:
   type: "count"
   count: 5
@@ -31,37 +31,65 @@ retryStrategy:
   totalAllowedRetryQuota: 100
   retryPerTestQuota: 2
 filteringConfiguration:
-  whitelist:
-  - type: "simple-class-name"
-    regex: ".*"
-  - type: "fully-qualified-class-name"
-    regex: ".*"
-  - type: "method"
-    regex: ".*"
-  - type: "composition"
-    filters:
-    - type: "package"
+  allowlist:
+    - type: "simple-class-name"
+      regex: ".*"
+    - type: "fully-qualified-class-name"
       regex: ".*"
     - type: "method"
       regex: ".*"
-    op: "UNION"
-  blacklist:
-  - type: "package"
-    regex: ".*"
-  - type: "annotation"
-    regex: ".*"
+    - type: "composition"
+      filters:
+        - type: "package"
+          regex: ".*"
+        - type: "method"
+          regex: ".*"
+      op: "UNION"
+  blocklist:
+    - type: "package"
+      regex: ".*"
+    - type: "annotation"
+      regex: ".*"
+    - type: "annotationData"
+      nameRegex: ".*"
+      valueRegex: ".*"
 testClassRegexes:
-- "^((?!Abstract).)*Test$"
-includeSerialRegexes: []
-excludeSerialRegexes: []
+  - "^((?!Abstract).)*Test$"
+includeSerialRegexes:
+  - "emulator-500[2,4]"
+excludeSerialRegexes:
+  - "emulator-5002"
 ignoreFailures: false
 isCodeCoverageEnabled: false
 fallbackToScreenshots: false
+strictMode: true
+testBatchTimeoutMillis: 20000
 testOutputTimeoutMillis: 30000
 debug: true
+screenRecordingPolicy: "ON_ANY"
+deviceInitializationTimeoutMillis: 300000
 vendorConfiguration:
   type: "Android"
   androidSdk: "/local/android"
   applicationApk: "kotlin-buildscript/build/outputs/apk/debug/kotlin-buildscript-debug.apk"
   testApplicationApk: "kotlin-buildscript/build/outputs/apk/androidTest/debug/kotlin-buildscript-debug-androidTest.apk"
   autoGrantPermission: true
+  applicationPmClear: true
+  testApplicationPmClear: true
+  instrumentationArgs:
+    debug: "false"
+  installOptions: "-d"
+  screenRecordConfiguration:
+    preferableRecorderType: "screenshot"
+    videoConfiguration:
+      enabled: false
+      width: 1080
+      height: 1920
+      bitrateMbps: 2
+      timeLimit: 300
+    screenshotConfiguration:
+      enabled: false
+      width: 1080
+      height: 1920
+      delayMs: 200
+  waitForDevicesTimeoutMillis: 15000

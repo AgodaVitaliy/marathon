@@ -4,31 +4,36 @@ import com.malinskiy.marathon.actor.Actor
 import com.malinskiy.marathon.actor.StateMachine
 import com.malinskiy.marathon.device.Device
 import com.malinskiy.marathon.device.DevicePoolId
+import com.malinskiy.marathon.exceptions.DeviceLostException
 import com.malinskiy.marathon.exceptions.TestBatchExecutionException
 import com.malinskiy.marathon.execution.Configuration
 import com.malinskiy.marathon.execution.DevicePoolMessage
-import com.malinskiy.marathon.execution.DevicePoolMessage.FromDevice.RequestNextBatch
+import com.malinskiy.marathon.execution.DevicePoolMessage.FromDevice.IsReady
 import com.malinskiy.marathon.execution.TestBatchResults
 import com.malinskiy.marathon.execution.progress.ProgressReporter
 import com.malinskiy.marathon.execution.withRetry
 import com.malinskiy.marathon.log.MarathonLogging
 import com.malinskiy.marathon.test.TestBatch
-import kotlinx.coroutines.experimental.CompletableDeferred
-import kotlinx.coroutines.experimental.Job
-import kotlinx.coroutines.experimental.async
-import kotlinx.coroutines.experimental.channels.SendChannel
-import kotlinx.coroutines.experimental.launch
-import kotlinx.coroutines.experimental.newSingleThreadContext
-import kotlin.properties.Delegates
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CompletionHandler
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.SendChannel
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlin.coroutines.CoroutineContext
 
-class DeviceActor(private val devicePoolId: DevicePoolId,
-                  private val pool: SendChannel<DevicePoolMessage>,
-                  private val configuration: Configuration,
-                  private val device: Device,
-                  private val progressReporter: ProgressReporter,
-                  parent: Job) : Actor<DeviceEvent>(parent = parent) {
-
-    private val deviceJob = Job(parent)
+class DeviceActor(
+    private val devicePoolId: DevicePoolId,
+    private val pool: SendChannel<DevicePoolMessage>,
+    private val configuration: Configuration,
+    val device: Device,
+    private val progressReporter: ProgressReporter,
+    parent: Job,
+    context: CoroutineContext
+) :
+    Actor<DeviceEvent>(parent = parent, context = context) {
 
     private val state = StateMachine.create<DeviceState, DeviceEvent, DeviceAction> {
         initialState(DeviceState.Connected)
@@ -45,7 +50,7 @@ class DeviceActor(private val devicePoolId: DevicePoolId,
         }
         state<DeviceState.Initializing> {
             on<DeviceEvent.Complete> {
-                transitionTo(DeviceState.Ready, DeviceAction.RequestNextBatch())
+                transitionTo(DeviceState.Ready, DeviceAction.NotifyIsReady())
             }
             on<DeviceEvent.Terminate> {
                 transitionTo(DeviceState.Terminated, DeviceAction.Terminate())
@@ -60,7 +65,7 @@ class DeviceActor(private val devicePoolId: DevicePoolId,
                 transitionTo(DeviceState.Running(it.batch, deferred), DeviceAction.ExecuteBatch(it.batch, deferred))
             }
             on<DeviceEvent.WakeUp> {
-                transitionTo(DeviceState.Ready, DeviceAction.RequestNextBatch())
+                transitionTo(DeviceState.Ready, DeviceAction.NotifyIsReady())
             }
             on<DeviceEvent.Terminate> {
                 transitionTo(DeviceState.Terminated, DeviceAction.Terminate())
@@ -71,7 +76,7 @@ class DeviceActor(private val devicePoolId: DevicePoolId,
                 transitionTo(DeviceState.Terminated, DeviceAction.Terminate(testBatch))
             }
             on<DeviceEvent.Complete> {
-                transitionTo(DeviceState.Ready, DeviceAction.RequestNextBatch(this.result))
+                transitionTo(DeviceState.Ready, DeviceAction.NotifyIsReady(this.result))
             }
             on<DeviceEvent.WakeUp> {
                 dontTransition()
@@ -85,27 +90,31 @@ class DeviceActor(private val devicePoolId: DevicePoolId,
         onTransition {
             val validTransition = it as? StateMachine.Transition.Valid
             if (validTransition !is StateMachine.Transition.Valid) {
-                logger.error { "from ${it.fromState} event ${it.event}" }
+                if (it.event !is DeviceEvent.WakeUp) {
+                    logger.error { "Invalid transition from ${it.fromState} event ${it.event}" }
+                }
                 return@onTransition
             }
             val sideEffect = validTransition.sideEffect
-            logger.debug { "from ${it.fromState} event ${it.event}" }
             when (sideEffect) {
                 DeviceAction.Initialize -> {
                     initialize()
                 }
-                is DeviceAction.RequestNextBatch -> {
-                    requestNextBatch(sideEffect.result)
+                is DeviceAction.NotifyIsReady -> {
+                    sideEffect.result?.let {
+                        sendResults(it)
+                    }
+                    notifyIsReady()
                 }
                 is DeviceAction.ExecuteBatch -> {
                     executeBatch(sideEffect.batch, sideEffect.result)
                 }
                 is DeviceAction.Terminate -> {
                     val batch = sideEffect.batch
-                    if(batch == null) {
+                    if (batch == null) {
                         terminate()
                     } else {
-                        returnBatch(batch).invokeOnCompletion {
+                        returnBatchAnd(batch, "Device ${device.serialNumber} terminated") {
                             terminate()
                         }
                     }
@@ -114,6 +123,11 @@ class DeviceActor(private val devicePoolId: DevicePoolId,
         }
     }
     private val logger = MarathonLogging.logger("DevicePool[${devicePoolId.name}]_DeviceActor[${device.serialNumber}]")
+
+    val isAvailable: Boolean
+        get() {
+            return !isClosedForSend && state.state == DeviceState.Ready
+        }
 
     override suspend fun receive(msg: DeviceEvent) {
         when (msg) {
@@ -126,69 +140,92 @@ class DeviceActor(private val devicePoolId: DevicePoolId,
         }
     }
 
-    private fun requestNextBatch(result: CompletableDeferred<TestBatchResults>?) {
-        launch(parent = deviceJob) {
-            if (result != null) {
-                val testResults = result.await()
-                pool.send(DevicePoolMessage.FromDevice.CompletedTestBatch(device, testResults))
-            } else {
-                pool.send(RequestNextBatch(device))
-            }
+    private fun sendResults(result: CompletableDeferred<TestBatchResults>) {
+        launch {
+            val testResults = result.await()
+            pool.send(DevicePoolMessage.FromDevice.CompletedTestBatch(device, testResults))
         }
     }
 
-    private val context = newSingleThreadContext(device.toString())
-
-    private var job by Delegates.observable<Job?>(null) { _, _, newValue ->
-        newValue?.invokeOnCompletion {
-            if (it == null) {
-                state.transition(DeviceEvent.Complete)
-            } else {
-                it.printStackTrace()
-                logger.error(it) { "Error ${it.message}" }
-                state.transition(DeviceEvent.Terminate)
-                terminate()
-            }
+    private fun notifyIsReady() {
+        launch {
+            pool.send(IsReady(device))
         }
     }
+
+    private var job: Job? = null
 
     private fun initialize() {
         logger.debug { "initialize ${device.serialNumber}" }
-        job = async(context, parent = deviceJob) {
-            withRetry(30, 10000) {
-                if(!isActive) return@async
-                try {
-                    device.prepare(configuration)
-                } catch (e: Exception) {
-                    logger.debug { "device ${device.serialNumber} initialization failed. Retrying" }
-                    throw e
+        job = async {
+            try {
+                withRetry(30, 10000) {
+                    if (isActive) {
+                        try {
+                            device.prepare(configuration)
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            logger.debug { "device ${device.serialNumber} initialization failed. Retrying" }
+                            logger.debug { e.message }
+                            throw e
+                        }
+                    }
                 }
+                state.transition(DeviceEvent.Complete)
+            } catch (e: Exception) {
+                logger.error(e) { "Error ${e.message}" }
+                state.transition(DeviceEvent.Terminate)
             }
         }
     }
 
     private fun executeBatch(batch: TestBatch, result: CompletableDeferred<TestBatchResults>) {
         logger.debug { "executeBatch ${device.serialNumber}" }
-        job = async(context, parent = deviceJob) {
+        job = async {
             try {
                 device.execute(configuration, devicePoolId, batch, result, progressReporter)
+                state.transition(DeviceEvent.Complete)
+            } catch (e: CancellationException) {
+                logger.warn(e) { "Device execution has been cancelled" }
+                state.transition(DeviceEvent.Terminate)
+            } catch (e: DeviceLostException) {
+                logger.error(e) { "Critical error during execution" }
+                state.transition(DeviceEvent.Terminate)
             } catch (e: TestBatchExecutionException) {
-                returnBatch(batch)
+                logger.warn(e) { "Test batch failed execution" }
+                pool.send(
+                    DevicePoolMessage.FromDevice.ReturnTestBatch(
+                        device,
+                        batch,
+                        "Test batch failed execution:\n${e.stackTraceToString()}"
+                    )
+                )
+                state.transition(DeviceEvent.Complete)
+            } catch (e: Throwable) {
+                logger.error(e) { "Unknown vendor exception caught. Considering this a recoverable error" }
+                pool.send(
+                    DevicePoolMessage.FromDevice.ReturnTestBatch(
+                        device, batch, "Unknown vendor exception caught. \n" +
+                            "${e.stackTraceToString()}"
+                    )
+                )
+                state.transition(DeviceEvent.Complete)
             }
         }
     }
 
-    private fun returnBatch(batch: TestBatch): Job {
-        return launch(parent = deviceJob) {
-            pool.send(DevicePoolMessage.FromDevice.ReturnTestBatch(device, batch))
+    private fun returnBatchAnd(batch: TestBatch, reason: String, completionHandler: CompletionHandler = {}): Job {
+        return launch {
+            pool.send(DevicePoolMessage.FromDevice.ReturnTestBatch(device, batch, reason))
+        }.apply {
+            invokeOnCompletion(completionHandler)
         }
     }
 
     private fun terminate() {
         logger.debug { "terminate ${device.serialNumber}" }
         job?.cancel()
-        context.close()
-        deviceJob.cancel()
         close()
     }
 }

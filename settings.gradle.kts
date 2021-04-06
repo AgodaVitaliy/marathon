@@ -15,9 +15,13 @@ pluginManagement {
 
 rootProject.name = "marathon"
 include("core")
-include("vendor-android")
-include("vendor-ios")
+include("vendor:vendor-android:base")
+include("vendor:vendor-android:ddmlib")
+include("vendor:vendor-android:adam")
+include("vendor:vendor-ios")
+include("vendor:vendor-test")
 include("marathon-gradle-plugin")
-include("marathon-html-report")
-include("execution-timeline")
+include("report:html-report")
+include("report:execution-timeline")
 include("cli")
+include(":analytics:usage")

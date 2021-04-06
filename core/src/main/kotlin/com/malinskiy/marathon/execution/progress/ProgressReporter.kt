@@ -1,7 +1,8 @@
 package com.malinskiy.marathon.execution.progress
 
-import com.malinskiy.marathon.device.Device
+import com.malinskiy.marathon.device.DeviceInfo
 import com.malinskiy.marathon.device.DevicePoolId
+import com.malinskiy.marathon.execution.Configuration
 import com.malinskiy.marathon.execution.progress.tracker.PoolProgressTracker
 import com.malinskiy.marathon.test.Test
 import com.malinskiy.marathon.test.toTestName
@@ -10,11 +11,11 @@ import kotlin.math.roundToInt
 
 const val HUNDRED_PERCENT_IN_FLOAT: Float = 100.0f
 
-class ProgressReporter {
+class ProgressReporter(private val configuration: Configuration) {
     private val reporters = ConcurrentHashMap<DevicePoolId, PoolProgressTracker>()
 
     private inline fun <T> execute(poolId: DevicePoolId, f: (PoolProgressTracker) -> T): T {
-        val reporter = reporters[poolId] ?: PoolProgressTracker()
+        val reporter = reporters[poolId] ?: PoolProgressTracker(configuration)
         val result = f(reporter)
         reporters[poolId] = reporter
         return result
@@ -26,23 +27,23 @@ class ProgressReporter {
         return String.format(format, percent)
     }
 
-    fun testStarted(poolId: DevicePoolId, device: Device, test: Test) {
-        execute(poolId) { it.testStarted(test, device) }
+    fun testStarted(poolId: DevicePoolId, device: DeviceInfo, test: Test) {
+        execute(poolId) { it.testStarted(test) }
         println("${toPercent(progress(poolId))} | [${poolId.name}]-[${device.serialNumber}] ${test.toTestName()} started")
     }
 
-    fun testFailed(poolId: DevicePoolId, device: Device, test: Test) {
-        execute(poolId) { it.testFailed(test, device) }
+    fun testFailed(poolId: DevicePoolId, device: DeviceInfo, test: Test) {
+        execute(poolId) { it.testFailed(test) }
         println("${toPercent(progress(poolId))} | [${poolId.name}]-[${device.serialNumber}] ${test.toTestName()} failed")
     }
 
-    fun testPassed(poolId: DevicePoolId, device: Device, test: Test) {
-        execute(poolId) { it.testPassed(test, device) }
+    fun testPassed(poolId: DevicePoolId, device: DeviceInfo, test: Test) {
+        execute(poolId) { it.testPassed(test) }
         println("${toPercent(progress(poolId))} | [${poolId.name}]-[${device.serialNumber}] ${test.toTestName()} ended")
     }
 
-    fun testIgnored(poolId: DevicePoolId, device: Device, test: Test) {
-        execute(poolId) { it.testIgnored(test, device) }
+    fun testIgnored(poolId: DevicePoolId, device: DeviceInfo, test: Test) {
+        execute(poolId) { it.testIgnored(test) }
     }
 
     fun aggregateResult(): Boolean {
@@ -65,7 +66,9 @@ class ProgressReporter {
 
     fun progress(): Float {
         val size = reporters.size
-        return reporters.values.sumByDouble { it.progress().toDouble() }.toFloat() / size
+        return reporters.values.sumByDouble {
+            it.progress().toDouble()
+        }.toFloat() / size
     }
 
     fun progress(poolId: DevicePoolId): Float {

@@ -1,11 +1,11 @@
 package com.malinskiy.marathon.execution.progress.tracker
 
 import com.malinskiy.marathon.actor.StateMachine
-import com.malinskiy.marathon.device.Device
+import com.malinskiy.marathon.execution.Configuration
 import com.malinskiy.marathon.test.Test
 import java.util.concurrent.atomic.AtomicInteger
 
-class PoolProgressTracker {
+class PoolProgressTracker(private val configuration: Configuration) {
 
     private val tests = mutableMapOf<Test, StateMachine<ProgressTestState, ProgressEvent, Any>>()
 
@@ -24,7 +24,11 @@ class PoolProgressTracker {
         }
         state<ProgressTestState.Passed> {
             on<ProgressEvent.Failed> {
-                dontTransition()
+                if (configuration.strictMode) {
+                    transitionTo(ProgressTestState.Failed)
+                } else {
+                    dontTransition()
+                }
             }
             on<ProgressEvent.Ignored> {
                 dontTransition()
@@ -32,8 +36,13 @@ class PoolProgressTracker {
         }
         state<ProgressTestState.Failed> {
             on<ProgressEvent.Passed> {
-                transitionTo(ProgressTestState.Passed)
+                if (configuration.strictMode) {
+                    dontTransition()
+                } else {
+                    transitionTo(ProgressTestState.Passed)
+                }
             }
+
         }
         state<ProgressTestState.Ignored> {
             on<ProgressEvent.Passed> {
@@ -42,33 +51,35 @@ class PoolProgressTracker {
         }
     }
 
-    private fun updateStatus(test: Test, newStatus: ProgressEvent) {
-        tests[test]?.transition(newStatus)
-    }
+    private fun updateStatus(test: Test, newStatus: ProgressEvent) = tests[test]?.transition(newStatus)
 
     private val totalTests = AtomicInteger(0)
     private val completed = AtomicInteger(0)
     private val failed = AtomicInteger(0)
+    private val ignored = AtomicInteger(0)
 
-    fun testStarted(test: Test, device: Device) {
+    fun testStarted(test: Test) {
         tests.computeIfAbsent(test) { _ -> createState() }
     }
 
-    fun testFailed(test: Test, device: Device) {
-        updateStatus(test, ProgressEvent.Failed)
+    fun testFailed(test: Test) {
         failed.updateAndGet {
             it + 1
         }
+        updateStatus(test, ProgressEvent.Failed)
     }
 
-    fun testPassed(test: Test, device: Device) {
+    fun testPassed(test: Test) {
         completed.updateAndGet {
             it + 1
         }
         updateStatus(test, ProgressEvent.Passed)
     }
 
-    fun testIgnored(test: Test, device: Device) {
+    fun testIgnored(test: Test) {
+        ignored.updateAndGet {
+            it + 1
+        }
         updateStatus(test, ProgressEvent.Ignored)
     }
 
@@ -91,7 +102,7 @@ class PoolProgressTracker {
     }
 
     fun progress(): Float {
-        return (completed.toFloat() + failed.toFloat()) / totalTests.toFloat()
+        return (completed.toFloat() + failed.toFloat() + ignored.toFloat()) / totalTests.toFloat()
     }
 
     fun addTests(count: Int) {

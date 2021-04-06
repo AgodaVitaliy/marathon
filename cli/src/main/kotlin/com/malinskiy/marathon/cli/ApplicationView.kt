@@ -12,28 +12,51 @@ import com.malinskiy.marathon.cli.args.environment.SystemEnvironmentReader
 import com.malinskiy.marathon.cli.config.ConfigFactory
 import com.malinskiy.marathon.cli.config.DeserializeModule
 import com.malinskiy.marathon.cli.config.time.InstantTimeProviderImpl
+import com.malinskiy.marathon.config.AppType
+import com.malinskiy.marathon.di.marathonStartKoin
+import com.malinskiy.marathon.exceptions.ExceptionsReporterFactory
 import com.malinskiy.marathon.log.MarathonLogging
+import com.malinskiy.marathon.usageanalytics.TrackActionType
+import com.malinskiy.marathon.usageanalytics.UsageAnalytics
+import com.malinskiy.marathon.usageanalytics.tracker.Event
 import com.xenomachina.argparser.ArgParser
+import com.xenomachina.argparser.SystemExitException
 import com.xenomachina.argparser.mainBody
+import org.koin.core.context.stopKoin
 
 private val logger = MarathonLogging.logger {}
 
 fun main(args: Array<String>): Unit = mainBody(
-        programName = "marathon v${BuildConfig.VERSION}"
+    programName = "marathon v${BuildConfig.VERSION}"
 ) {
     ArgParser(args).parseInto(::MarathonCliConfiguration).run {
         logger.info { "Starting marathon" }
-
-        val mapper = ObjectMapper(YAMLFactory().disable(YAMLGenerator.Feature.USE_NATIVE_TYPE_ID))
-        mapper.registerModule(DeserializeModule(InstantTimeProviderImpl()))
+        val bugsnagExceptionsReporter = ExceptionsReporterFactory.get(bugsnagReporting)
+        try {
+            bugsnagExceptionsReporter.start(AppType.CLI)
+            val mapper = ObjectMapper(YAMLFactory().disable(YAMLGenerator.Feature.USE_NATIVE_TYPE_ID))
+            mapper.registerModule(DeserializeModule(InstantTimeProviderImpl()))
                 .registerModule(KotlinModule())
                 .registerModule(JavaTimeModule())
-
-        val configuration = ConfigFactory(mapper).create(
+            val configuration = ConfigFactory(mapper).create(
                 marathonfile = marathonfile,
                 environmentReader = SystemEnvironmentReader()
-        )
-        val marathon = Marathon(configuration = configuration)
-        marathon.run()
+            )
+
+            val application = marathonStartKoin(configuration)
+            val marathon: Marathon = application.koin.get()
+
+            UsageAnalytics.enable = this.analyticsTracking
+            UsageAnalytics.USAGE_TRACKER.trackEvent(Event(TrackActionType.RunType, "cli"))
+            val success = marathon.run()
+
+            val shouldReportFailure = !configuration.ignoreFailures
+            if (!success && shouldReportFailure) {
+                throw SystemExitException("Build failed", 1)
+            }
+        } finally {
+            stopKoin()
+            bugsnagExceptionsReporter.end()
+        }
     }
 }

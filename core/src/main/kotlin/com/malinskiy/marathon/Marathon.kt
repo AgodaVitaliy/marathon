@@ -1,59 +1,52 @@
 package com.malinskiy.marathon
 
-import com.google.gson.Gson
-import com.malinskiy.marathon.analytics.AnalyticsFactory
+import com.malinskiy.marathon.analytics.external.Analytics
+import com.malinskiy.marathon.analytics.internal.pub.Track
+import com.malinskiy.marathon.analytics.internal.sub.TrackerInternal
+import com.malinskiy.marathon.config.LogicalConfigurationValidator
 import com.malinskiy.marathon.device.DeviceProvider
+import com.malinskiy.marathon.exceptions.NoDevicesException
+import com.malinskiy.marathon.exceptions.NoTestCasesFoundException
 import com.malinskiy.marathon.execution.Configuration
 import com.malinskiy.marathon.execution.Scheduler
 import com.malinskiy.marathon.execution.TestParser
+import com.malinskiy.marathon.execution.TestShard
 import com.malinskiy.marathon.execution.progress.ProgressReporter
-import com.malinskiy.marathon.io.FileManager
 import com.malinskiy.marathon.log.MarathonLogging
-import com.malinskiy.marathon.report.CompositeSummaryPrinter
-import com.malinskiy.marathon.report.SummaryCompiler
-import com.malinskiy.marathon.report.SummaryPrinter
-import com.malinskiy.marathon.report.debug.timeline.TimelineSummaryPrinter
-import com.malinskiy.marathon.report.debug.timeline.TimelineSummarySerializer
-import com.malinskiy.marathon.report.html.HtmlSummaryPrinter
-import com.malinskiy.marathon.report.internal.DeviceInfoReporter
-import com.malinskiy.marathon.report.internal.TestResultReporter
 import com.malinskiy.marathon.test.Test
 import com.malinskiy.marathon.test.toTestName
+import com.malinskiy.marathon.time.Timer
+import com.malinskiy.marathon.usageanalytics.TrackActionType
+import com.malinskiy.marathon.usageanalytics.UsageAnalytics
+import com.malinskiy.marathon.usageanalytics.tracker.Event
 import com.malinskiy.marathon.vendor.VendorConfiguration
-import kotlinx.coroutines.experimental.runBlocking
-import java.util.ServiceLoader
-import java.util.concurrent.TimeUnit
-import kotlin.system.measureTimeMillis
+import kotlinx.coroutines.runBlocking
+import org.koin.core.context.stopKoin
+import java.util.*
+import kotlin.coroutines.coroutineContext
 
 private val log = MarathonLogging.logger {}
 
-class Marathon(val configuration: Configuration) {
+class Marathon(
+    val configuration: Configuration,
+    private val tracker: TrackerInternal,
+    private val analytics: Analytics,
+    private val progressReporter: ProgressReporter,
+    private val track: Track,
+    private val timer: Timer
+) {
 
-    private val fileManager = FileManager(configuration.outputDir)
-    private val gson = Gson()
+    private val configurationValidator = LogicalConfigurationValidator()
 
-    private val testResultReporter = TestResultReporter(fileManager, gson)
-    private val deviceInfoReporter = DeviceInfoReporter(fileManager, gson)
-    private val analyticsFactory = AnalyticsFactory(configuration, fileManager, deviceInfoReporter, testResultReporter,
-            gson)
+    private fun configureLogging(vendorConfiguration: VendorConfiguration) {
+        MarathonLogging.debug = configuration.debug
 
-    private val summaryCompiler = SummaryCompiler(deviceInfoReporter, testResultReporter, configuration)
-
-    private fun loadSummaryPrinter(): SummaryPrinter {
-        val outputDir = configuration.outputDir
-        val htmlSummaryPrinter = HtmlSummaryPrinter(gson, outputDir)
-        if (configuration.debug) {
-            return CompositeSummaryPrinter(listOf(
-                    htmlSummaryPrinter,
-                    TimelineSummaryPrinter(TimelineSummarySerializer(analyticsFactory.rawTestResultTracker), gson, outputDir)
-            ))
-        }
-        return htmlSummaryPrinter
+        vendorConfiguration.logConfigurator()?.configure(vendorConfiguration)
     }
 
-    private fun loadDeviceProvider(vendorConfiguration: VendorConfiguration): DeviceProvider {
-        var vendorDeviceProvider = vendorConfiguration.deviceProvider()
-                ?: ServiceLoader.load(DeviceProvider::class.java).first()
+    private suspend fun loadDeviceProvider(vendorConfiguration: VendorConfiguration): DeviceProvider {
+        val vendorDeviceProvider = vendorConfiguration.deviceProvider()
+            ?: ServiceLoader.load(DeviceProvider::class.java).first()
 
         vendorDeviceProvider.initialize(configuration.vendorConfiguration)
         return vendorDeviceProvider
@@ -68,20 +61,49 @@ class Marathon(val configuration: Configuration) {
         return loader.first()
     }
 
-    fun run(): Boolean = runBlocking {
-        MarathonLogging.debug = configuration.debug
+    fun run() = runBlocking {
+        try {
+            runAsync()
+        } catch (th: Throwable) {
+            log.error(th.toString())
+
+            when (th) {
+                is NoDevicesException -> {
+                    log.warn { "No devices found" }
+                    false
+                }
+                else -> configuration.ignoreFailures
+            }
+        }
+    }
+
+    suspend fun runAsync(): Boolean {
+        configureLogging(configuration.vendorConfiguration)
+        trackAnalytics(configuration)
 
         val testParser = loadTestParser(configuration.vendorConfiguration)
         val deviceProvider = loadDeviceProvider(configuration.vendorConfiguration)
-        val analytics = analyticsFactory.create()
+
+        configurationValidator.validate(configuration)
 
         val parsedTests = testParser.extract(configuration)
+        if (parsedTests.isEmpty()) throw NoTestCasesFoundException("No tests cases were found")
         val tests = applyTestFilters(parsedTests)
+        val shard = prepareTestShard(tests, analytics)
 
         log.info("Scheduling ${tests.size} tests")
-        log.debug(tests.map { it.toTestName() }.joinToString(", "))
-        val progressReporter = ProgressReporter()
-        val scheduler = Scheduler(deviceProvider, analytics, configuration, tests, progressReporter)
+        log.debug(tests.joinToString(", ") { it.toTestName() })
+        val currentCoroutineContext = coroutineContext
+        val scheduler = Scheduler(
+            deviceProvider,
+            analytics,
+            configuration,
+            shard,
+            progressReporter,
+            track,
+            timer,
+            currentCoroutineContext
+        )
 
         if (configuration.outputDir.exists()) {
             log.info { "Output ${configuration.outputDir} already exists" }
@@ -89,34 +111,60 @@ class Marathon(val configuration: Configuration) {
         }
         configuration.outputDir.mkdirs()
 
-        val timeMillis = measureTimeMillis {
+        val hook = installShutdownHook { onFinish(analytics, deviceProvider) }
+
+        if (tests.isNotEmpty()) {
             scheduler.execute()
         }
 
-        val pools = scheduler.getPools()
-        if (!pools.isEmpty()) {
-            val summaryPrinter = loadSummaryPrinter()
-            val summary = summaryCompiler.compile(scheduler.getPools())
-            summaryPrinter.print(summary)
+        onFinish(analytics, deviceProvider)
+        hook.uninstall()
+
+        stopKoin()
+        return progressReporter.aggregateResult()
+    }
+
+    private fun installShutdownHook(block: suspend () -> Unit): ShutdownHook {
+        val shutdownHook = ShutdownHook(configuration) {
+            runBlocking {
+                block.invoke()
+            }
         }
+        shutdownHook.install()
+        return shutdownHook
+    }
 
-        val hours = TimeUnit.MILLISECONDS.toHours(timeMillis)
-        val minutes = TimeUnit.MILLISECONDS.toMinutes(timeMillis) % 60
-        val seconds = TimeUnit.MILLISECONDS.toSeconds(timeMillis) % 60
-
-        log.info { "Total time: ${hours}H ${minutes}m ${seconds}s" }
-        analytics.terminate()
+    private suspend fun onFinish(analytics: Analytics, deviceProvider: DeviceProvider) {
         analytics.close()
         deviceProvider.terminate()
-        progressReporter.aggregateResult()
+        tracker.close()
     }
 
     private fun applyTestFilters(parsedTests: List<Test>): List<Test> {
         var tests = parsedTests.filter { test ->
             configuration.testClassRegexes.all { it.matches(test.clazz) }
         }
-        configuration.filteringConfiguration.whitelist.forEach { tests = it.filter(tests) }
-        configuration.filteringConfiguration.blacklist.forEach { tests = it.filterNot(tests) }
+        configuration.filteringConfiguration.allowlist.forEach { tests = it.filter(tests) }
+        configuration.filteringConfiguration.blocklist.forEach { tests = it.filterNot(tests) }
         return tests
+    }
+
+    private fun prepareTestShard(tests: List<Test>, analytics: Analytics): TestShard {
+        val shardingStrategy = configuration.shardingStrategy
+        val flakinessShard = configuration.flakinessStrategy
+        val shard = shardingStrategy.createShard(tests)
+        return flakinessShard.process(shard, analytics)
+    }
+
+    private fun trackAnalytics(configuration: Configuration) {
+        UsageAnalytics.USAGE_TRACKER.run {
+            trackEvent(Event(TrackActionType.VendorConfiguration, configuration.vendorConfiguration.javaClass.name))
+            trackEvent(Event(TrackActionType.PoolingStrategy, configuration.poolingStrategy.javaClass.name))
+            trackEvent(Event(TrackActionType.ShardingStrategy, configuration.shardingStrategy.javaClass.name))
+            trackEvent(Event(TrackActionType.SortingStrategy, configuration.sortingStrategy.javaClass.name))
+            trackEvent(Event(TrackActionType.RetryStrategy, configuration.retryStrategy.javaClass.name))
+            trackEvent(Event(TrackActionType.BatchingStrategy, configuration.batchingStrategy.javaClass.name))
+            trackEvent(Event(TrackActionType.FlakinessStrategy, configuration.flakinessStrategy.javaClass.name))
+        }
     }
 }

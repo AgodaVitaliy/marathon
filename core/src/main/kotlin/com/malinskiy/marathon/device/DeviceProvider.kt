@@ -1,7 +1,7 @@
 package com.malinskiy.marathon.device
 
 import com.malinskiy.marathon.vendor.VendorConfiguration
-import kotlinx.coroutines.experimental.channels.Channel
+import kotlinx.coroutines.channels.Channel
 
 interface DeviceProvider {
     sealed class DeviceEvent {
@@ -9,9 +9,8 @@ interface DeviceProvider {
         class DeviceDisconnected(val device: Device) : DeviceEvent()
     }
 
-    fun initialize(vendorConfiguration: VendorConfiguration)
-    fun subscribe() : Channel<DeviceEvent>
-    fun lockDevice(device: Device) : Boolean
-    fun unlockDevice(device: Device) : Boolean
-    fun terminate()
+    val deviceInitializationTimeoutMillis: Long
+    suspend fun initialize(vendorConfiguration: VendorConfiguration)
+    suspend fun terminate()
+    fun subscribe(): Channel<DeviceEvent>
 }

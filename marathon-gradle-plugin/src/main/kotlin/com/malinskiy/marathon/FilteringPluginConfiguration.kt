@@ -1,39 +1,41 @@
 package com.malinskiy.marathon
 
+import com.malinskiy.marathon.execution.AnnotationDataFilter
 import com.malinskiy.marathon.execution.AnnotationFilter
 import com.malinskiy.marathon.execution.FilteringConfiguration
 import com.malinskiy.marathon.execution.FullyQualifiedClassnameFilter
 import com.malinskiy.marathon.execution.SimpleClassnameFilter
 import com.malinskiy.marathon.execution.TestFilter
+import com.malinskiy.marathon.execution.TestMethodFilter
 import com.malinskiy.marathon.execution.TestPackageFilter
 import groovy.lang.Closure
 
 open class FilteringPluginConfiguration {
     //groovy
-    var groovyWhiteList: Wrapper? = null
-    var groovyBlackList: Wrapper? = null
+    var groovyAllowList: Wrapper? = null
+    var groovyBlockList: Wrapper? = null
 
-    fun whitelist(closure: Closure<*>) {
-        groovyWhiteList = Wrapper()
-        closure.delegate = groovyWhiteList
+    fun allowlist(closure: Closure<*>) {
+        groovyAllowList = Wrapper()
+        closure.delegate = groovyAllowList
         closure.call()
     }
 
-    fun blacklist(closure: Closure<*>) {
-        groovyBlackList = Wrapper()
-        closure.delegate = groovyBlackList
+    fun blocklist(closure: Closure<*>) {
+        groovyBlockList = Wrapper()
+        closure.delegate = groovyBlockList
         closure.call()
     }
 
     //kts
-    var whitelist: MutableCollection<TestFilter> = mutableListOf()
-    var blacklist: MutableCollection<TestFilter> = mutableListOf()
-    fun whitelist(block: MutableCollection<TestFilter>.() -> Unit) {
-        whitelist.also(block)
+    var allowlist: MutableCollection<TestFilter> = mutableListOf()
+    var blocklist: MutableCollection<TestFilter> = mutableListOf()
+    fun allowlist(block: MutableCollection<TestFilter>.() -> Unit) {
+        allowlist.also(block)
     }
 
-    fun blacklist(block: MutableCollection<TestFilter>.() -> Unit) {
-        blacklist.also(block)
+    fun blocklist(block: MutableCollection<TestFilter>.() -> Unit) {
+        blocklist.also(block)
     }
 }
 
@@ -41,7 +43,9 @@ open class Wrapper {
     open var simpleClassNameFilter: ArrayList<String>? = null
     open var fullyQualifiedClassnameFilter: ArrayList<String>? = null
     open var testPackageFilter: ArrayList<String>? = null
+    open var testMethodFilter: ArrayList<String>? = null
     open var annotationFilter: ArrayList<String>? = null
+    open var annotationDataFilter: ArrayList<String>? = null
 }
 
 fun Wrapper.toList(): List<TestFilter> {
@@ -55,19 +59,28 @@ fun Wrapper.toList(): List<TestFilter> {
     this.testPackageFilter?.map { TestPackageFilter(it.toRegex()) }?.let {
         mutableList.addAll(it)
     }
+    this.testMethodFilter?.map { TestMethodFilter(it.toRegex()) }?.let {
+        mutableList.addAll(it)
+    }
     this.simpleClassNameFilter?.map { SimpleClassnameFilter(it.toRegex()) }?.let {
+        mutableList.addAll(it)
+    }
+    this.annotationDataFilter?.map {
+        val currentData = it.split(",")
+        AnnotationDataFilter( currentData.first().toRegex(), currentData[1].toRegex())
+    }?.let {
         mutableList.addAll(it)
     }
     return mutableList
 }
 
 fun FilteringPluginConfiguration.toFilteringConfiguration(): FilteringConfiguration {
-    if (groovyWhiteList != null || groovyBlackList != null) {
-        val white = groovyWhiteList?.toList() ?: emptyList()
+    if (groovyAllowList != null || groovyBlockList != null) {
+        val allow = groovyAllowList?.toList() ?: emptyList()
 
-        val black = groovyBlackList?.toList() ?: emptyList()
-        return FilteringConfiguration(white, black)
+        val block = groovyBlockList?.toList() ?: emptyList()
+        return FilteringConfiguration(allow, block)
     }
-    return FilteringConfiguration(whitelist, blacklist)
+    return FilteringConfiguration(allowlist, blocklist)
 }
 
